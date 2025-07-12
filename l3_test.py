@@ -186,20 +186,26 @@ def process_query(query):
             # Append function call and result of the function execution to contents
             contents.append(response.candidates[0].content) # Append the content from the model's response.
             contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
-            final_response = client.models.generate_content(
+            response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 config=config,
                 contents=contents,
             )
-            if len(final_response.candidates[0].content.parts) == 1 and final_response.candidates[0].content.parts[0].text:
+            if len(response.candidates[0].content.parts) == 1 and response.candidates[0].content.parts[0].text:
                 process_query = False
-                print(f"Final response: {final_response.candidates[0].content.parts[0].text}")
-                
+                print(f"Final response: {response.candidates[0].content.parts[0].text}") 
         else:
-            print(response.text)
-            assistant_content.append(response.text)
-            if len(final_response.candidates[0].content.parts) == 1:
+            candidate = response.candidates[0]
+            text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
+            if text_parts:
+                text_response = ' '.join(text_parts)
+                print(text_response)
+                assistant_content.append(text_response)
+            else:
+                print("No response generated")
+            if len(candidate.content.parts) == 1:
                 process_query = False
+
     
 
 def chat_loop():
