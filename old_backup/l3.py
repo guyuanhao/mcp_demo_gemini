@@ -3,8 +3,7 @@ import json
 import os
 from typing import List
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+import anthropic
 
 PAPER_DIR = "papers"
 
@@ -100,7 +99,7 @@ tools = [
     {
         "name": "search_papers",
         "description": "Search for papers on arXiv based on a topic and store their information.",
-        "parameters": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "topic": {
@@ -119,7 +118,7 @@ tools = [
     {
         "name": "extract_info",
         "description": "Search for information about a specific paper across all topic directories.",
-        "parameters": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "paper_id": {
@@ -157,50 +156,55 @@ def execute_tool(tool_name, tool_args):
     return result
 
 def process_query(query):
-
-    contents = [
-        types.Content(
-            role="user", parts=[types.Part(text=query)]
-        )
-    ]
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contents,
-        config=config,
-    )
+    
+    messages = [{'role': 'user', 'content': query}]
+    
+    response = client.messages.create(max_tokens = 2024,
+                                  model = 'claude-3-7-sonnet-20250219', 
+                                  tools = tools,
+                                  messages = messages)
+    
     process_query = True
-
     while process_query:
         assistant_content = []
-        function_call = response.candidates[0].content.parts[0].function_call
-        if function_call:
-            contents.append(types.Content(role="model", parts=[types.Part(text=str(assistant_content))]))
-            
-            print(f"Function to call: {function_call.name} with arguments: {function_call.args}")
-            result = execute_tool(function_call.name, function_call.args)
-            # Create a function response part
-            function_response_part = types.Part.from_function_response(
-                name=function_call.name,
-                response={"result": result},
-            )
-            # Append function call and result of the function execution to contents
-            contents.append(response.candidates[0].content) # Append the content from the model's response.
-            contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
-            final_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                config=config,
-                contents=contents,
-            )
-            if len(final_response.candidates[0].content.parts) == 1 and final_response.candidates[0].content.parts[0].text:
-                process_query = False
-                print(f"Final response: {final_response.candidates[0].content.parts[0].text}")
+
+        for content in response.content:
+            if content.type == 'text':
                 
-        else:
-            print(response.text)
-            assistant_content.append(response.text)
-            if len(final_response.candidates[0].content.parts) == 1:
-                process_query = False
-    
+                print(content.text)
+                assistant_content.append(content)
+                
+                if len(response.content) == 1:
+                    process_query = False
+            
+            elif content.type == 'tool_use':
+                
+                assistant_content.append(content)
+                messages.append({'role': 'assistant', 'content': assistant_content})
+                
+                tool_id = content.id
+                tool_args = content.input
+                tool_name = content.name
+                print(f"Calling tool {tool_name} with args {tool_args}")
+                
+                result = execute_tool(tool_name, tool_args)
+                messages.append({"role": "user", 
+                                  "content": [
+                                      {
+                                          "type": "tool_result",
+                                          "tool_use_id": tool_id,
+                                          "content": result
+                                      }
+                                  ]
+                                })
+                response = client.messages.create(max_tokens = 2024,
+                                  model = 'claude-3-7-sonnet-20250219', 
+                                  tools = tools,
+                                  messages = messages) 
+                
+                if len(response.content) == 1 and response.content[0].type == "text":
+                    print(response.content[0].text)
+                    process_query = False
 
 def chat_loop():
     print("Type your queries or 'quit' to exit.")
@@ -216,10 +220,5 @@ def chat_loop():
             print(f"\nError: {str(e)}")
 
 load_dotenv() 
-# The client gets the API key from the environment variable `GEMINI_API_KEY`.
-client = genai.Client()
-tool_types = types.Tool(function_declarations=tools)
-config = types.GenerateContentConfig(tools=[tool_types])
-
+client = anthropic.Anthropic()
 chat_loop()
-
