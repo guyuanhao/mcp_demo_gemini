@@ -18,7 +18,12 @@ source .venv/bin/activate
 Install dependencies:
 ```bash
 uv add mcp arxiv
+```
 Launch the inspector:
+```bash
 npx @modelcontextprotocol/inspector uv run research_server.py
 ```
 If you get a message asking "need to install the following packages", type: y
+
+Once the above commands are executed, open the prompted url and you shall see following page:
+![inspector](inspector.png "inspector")
