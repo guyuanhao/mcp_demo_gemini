@@ -1,231 +1,155 @@
-import arxiv
-import json
-import os
+from dotenv import load_dotenv
+from mcp import ClientSession, StdioServerParameters, types
+from mcp.client.stdio import stdio_client
 from typing import List
+import asyncio
+import nest_asyncio
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 PAPER_DIR = "papers"
 
-def search_papers(topic: str, max_results: int = 5) -> List[str]:
-    """
-    Search for papers on arXiv based on a topic and store their information.
-    
-    Args:
-        topic: The topic to search for
-        max_results: Maximum number of results to retrieve (default: 5)
-        
-    Returns:
-        List of paper IDs found in the search
-    """
-    
-    # Use arxiv to find the papers 
-    client = arxiv.Client()
+nest_asyncio.apply()
+load_dotenv()
+# Create server parameters for stdio connection
+server_params = StdioServerParameters(
+    command="uv",  # Executable
+    args=["run", "research_server.py"],  # Optional command line arguments
+    env=None,  # Optional environment variables
+)
 
-    # Search for the most relevant articles matching the queried topic
-    search = arxiv.Search(
-        query = topic,
-        max_results = max_results,
-        sort_by = arxiv.SortCriterion.Relevance
-    )
+class MCP_Chatbot:
+    def __init__(self):
+        self.session: ClientSession | None = None
+        # The client gets the API key from the environment variable `GEMINI_API_KEY`.
+        self.client = genai.Client()
+        self.tool_types = None
+        self.config = None
+        self.model = "gemini-2.5-flash"
 
-    papers = client.results(search)
-    
-    # Create directory for this topic
-    path = os.path.join(PAPER_DIR, topic.lower().replace(" ", "_"))
-    os.makedirs(path, exist_ok=True)
-    
-    file_path = os.path.join(path, "papers_info.json")
-
-    # Try to load existing papers info
-    try:
-        with open(file_path, "r") as json_file:
-            papers_info = json.load(json_file)
-    except (FileNotFoundError, json.JSONDecodeError):
-        papers_info = {}
-
-    # Process each paper and add to papers_info  
-    paper_ids = []
-    for paper in papers:
-        paper_ids.append(paper.get_short_id())
-        paper_info = {
-            'title': paper.title,
-            'authors': [author.name for author in paper.authors],
-            'summary': paper.summary,
-            'pdf_url': paper.pdf_url,
-            'published': str(paper.published.date())
-        }
-        papers_info[paper.get_short_id()] = paper_info
-    
-    # Save updated papers_info to json file
-    with open(file_path, "w") as json_file:
-        json.dump(papers_info, json_file, indent=2)
-    
-    print(f"Results are saved in: {file_path}")
-    
-    return paper_ids
-
-def extract_info(paper_id: str) -> str:
-    """
-    Search for information about a specific paper across all topic directories.
-    
-    Args:
-        paper_id: The ID of the paper to look for
-        
-    Returns:
-        JSON string with paper information if found, error message if not found
-    """
- 
-    for item in os.listdir(PAPER_DIR):
-        item_path = os.path.join(PAPER_DIR, item)
-        if os.path.isdir(item_path):
-            file_path = os.path.join(item_path, "papers_info.json")
-            if os.path.isfile(file_path):
-                try:
-                    with open(file_path, "r") as json_file:
-                        papers_info = json.load(json_file)
-                        if paper_id in papers_info:
-                            return json.dumps(papers_info[paper_id], indent=2)
-                except (FileNotFoundError, json.JSONDecodeError) as e:
-                    print(f"Error reading {file_path}: {str(e)}")
-                    continue
-    
-    return f"There's no saved information related to paper {paper_id}."
-
-# search_papers("computers")
-# print(extract_info('1310.7911v2'))
-
-tools = [
-    {
-        "name": "search_papers",
-        "description": "Search for papers on arXiv based on a topic and store their information.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "topic": {
-                    "type": "string",
-                    "description": "The topic to search for"
-                }, 
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of results to retrieve",
-                    "default": 5
-                }
-            },
-            "required": ["topic"]
-        }
-    },
-    {
-        "name": "extract_info",
-        "description": "Search for information about a specific paper across all topic directories.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "paper_id": {
-                    "type": "string",
-                    "description": "The ID of the paper to look for"
-                }
-            },
-            "required": ["paper_id"]
-        }
-    }
-]
-
-mapping_tool_function = {
-    "search_papers": search_papers,
-    "extract_info": extract_info
-}
-
-def execute_tool(tool_name, tool_args):
-    
-    result = mapping_tool_function[tool_name](**tool_args)
-
-    if result is None:
-        result = "The operation completed but didn't return any results."
-        
-    elif isinstance(result, list):
-        result = ', '.join(result)
-        
-    elif isinstance(result, dict):
-        # Convert dictionaries to formatted JSON strings
-        result = json.dumps(result, indent=2)
-    
-    else:
-        # For any other type, convert using str()
-        result = str(result)
-    return result
-
-def process_query(query):
-
-    contents = [
-        types.Content(
-            role="user", parts=[types.Part(text=query)]
+    async def process_query(self, query):
+        contents = [
+            types.Content(
+                role="user", parts=[types.Part(text=query)]
+            )
+        ]
+        response = self.client.models.generate_content(
+            model= self.model,
+            contents=contents,
+            config=self.config,
         )
-    ]
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contents,
-        config=config,
-    )
-    process_query = True
+        process_query = True
 
-    while process_query:
-        assistant_content = []
-        function_call = response.candidates[0].content.parts[0].function_call
-        if function_call:
-            contents.append(types.Content(role="model", parts=[types.Part(text=str(assistant_content))]))
-            
-            print(f"Function to call: {function_call.name} with arguments: {function_call.args}")
-            result = execute_tool(function_call.name, function_call.args)
-            # Create a function response part
-            function_response_part = types.Part.from_function_response(
-                name=function_call.name,
-                response={"result": result},
-            )
-            # Append function call and result of the function execution to contents
-            contents.append(response.candidates[0].content) # Append the content from the model's response.
-            contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                config=config,
-                contents=contents,
-            )
-            if len(response.candidates[0].content.parts) == 1 and response.candidates[0].content.parts[0].text:
-                process_query = False
-                print(f"Final response: {response.candidates[0].content.parts[0].text}") 
-        else:
-            candidate = response.candidates[0]
-            text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
-            if text_parts:
-                text_response = ' '.join(text_parts)
-                print(text_response)
-                assistant_content.append(text_response)
-            else:
+        while process_query:
+            assistant_content = []
+            if not response.candidates or not response.candidates[0].content:
                 print("No response generated")
-            if len(candidate.content.parts) == 1:
-                process_query = False
-
-    
-
-def chat_loop():
-    print("Type your queries or 'quit' to exit.")
-    while True:
-        try:
-            query = input("\nQuery: ").strip()
-            if query.lower() == 'quit':
                 break
+                
+            candidate = response.candidates[0]
+            content = candidate.content
+            if not content or not content.parts:
+                print("No content parts in response")
+                break
+                
+            first_part = content.parts[0]
+            function_call = getattr(first_part, 'function_call', None)
+            
+            if function_call:
+                contents.append(types.Content(role="model", parts=[types.Part(text=str(assistant_content))]))
+                tool_name = function_call.name
+                tool_args = function_call.args
+                print(f"Function to call: {tool_name} with arguments: {tool_args}")
+                
+                if self.session and tool_name:
+                    result = await self.session.call_tool(tool_name, tool_args)
+                    # Create a function response part
+                    function_response_part = types.Part.from_function_response(
+                        name=tool_name,
+                        response={"result": result},
+                    )
+                    # Append function call and result of the function execution to contents
+                    if content:
+                        contents.append(content) # Append the content from the model's response.
+                    contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
+                    response = self.client.models.generate_content(
+                        model=self.model,
+                        config=self.config,
+                        contents=contents,
+                    )
+                    if response.candidates and response.candidates[0].content and response.candidates[0].content.parts and len(response.candidates[0].content.parts) == 1 and response.candidates[0].content.parts[0].text:
+                        print(f"Final response: {response.candidates[0].content.parts[0].text}") 
+                        process_query = False
+                else:
+                    print("Session not available or tool name is None")
+                    break
+            else:
+                text_parts = [part.text for part in content.parts if hasattr(part, 'text') and part.text]
+                if text_parts:
+                    text_response = ' '.join(text_parts)
+                    print(text_response)
+                    assistant_content.append(text_response)
+                else:
+                    print("No response generated")
+                if len(content.parts) == 1:
+                    process_query = False
     
-            process_query(query)
-            print("\n")
-        except Exception as e:
-            print(f"\nError: {str(e)}")
 
-load_dotenv() 
-# The client gets the API key from the environment variable `GEMINI_API_KEY`.
-client = genai.Client()
-tool_types = types.Tool(function_declarations=tools)
-config = types.GenerateContentConfig(tools=[tool_types])
+    async def chat_loop(self):
+        """Run an interactive chat loop"""
+        print("\nMCP Chatbot Started!")
+        print("Type your queries or 'quit' to exit.")
+        
+        while True:
+            try:
+                query = input("\nQuery: ").strip()
+        
+                if query.lower() == 'quit':
+                    break
+                    
+                await self.process_query(query)
+                print("\n")
+                    
+            except Exception as e:
+                print(f"\nError: {str(e)}")
 
-chat_loop()
+        
+    async def connect_to_server_and_run(self):
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                self.session = session
+                # Initialize the connection
+                await session.initialize()
+                
+                # List available tools
+                response = await session.list_tools()
+                
+                tools = response.tools
+                print("\nConnected to server with tools:", [tool.name for tool in tools])
+
+                gemini_tools = []
+                for tool in response.tools:
+                    gemini_tool = {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema
+                    }
+                    gemini_tools.append(gemini_tool)
+
+                # The client gets the API key from the environment variable `GEMINI_API_KEY`.
+                self.tool_types = types.Tool(function_declarations=gemini_tools)
+                self.config = types.GenerateContentConfig(tools=[self.tool_types])
+    
+                await self.chat_loop()
+
+
+
+
+async def main():
+    chatbot = MCP_Chatbot()
+    await chatbot.connect_to_server_and_run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
