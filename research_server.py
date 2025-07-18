@@ -72,10 +72,11 @@ def search_papers(topic: str, max_results: int = 5) -> List[str]:
 @mcp.tool()
 def extract_info(paper_id: str) -> str:
     """
-    Search for information about a specific paper across all topic directories.
+    Extract detailed information about a specific paper that was previously found through search_papers.
+    Use this tool to get detailed information (title, authors, summary, etc.) about papers that were returned by search_papers.
     
     Args:
-        paper_id: The ID of the paper to look for
+        paper_id: The ID of the paper to extract information for (e.g., "1104.3954v1")
         
     Returns:
         JSON string with paper information if found, error message if not found
