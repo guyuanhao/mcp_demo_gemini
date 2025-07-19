@@ -18,6 +18,7 @@ server_params = StdioServerParameters(
     args=["run", "research_server.py"],  # Optional command line arguments
     env=None,  # Optional environment variables
 )
+chat_history_limit = 100
 
 class MCP_Chatbot:
     def __init__(self):
@@ -27,16 +28,21 @@ class MCP_Chatbot:
         self.tool_types = None
         self.config = None
         self.model = "gemini-2.5-flash"
+        self.contents = []
+
+    def append_content(self, content):
+        if len(self.contents) >= chat_history_limit:
+            self.contents.pop(0)
+        self.contents.append(content)
 
     async def process_query(self, query):
-        contents = [
-            types.Content(
-                role="user", parts=[types.Part(text=query)]
-            )
-        ]
+        self.append_content(types.Content(
+            role="user", parts=[types.Part(text=query)]
+        ))
+
         response = self.client.models.generate_content(
             model= self.model,
-            contents=contents,
+            contents=self.contents,
             config=self.config,
         )
         process_query = True
@@ -52,44 +58,64 @@ class MCP_Chatbot:
             if not content or not content.parts:
                 print("No content parts in response")
                 break
-                
-            first_part = content.parts[0]
-            function_call = getattr(first_part, 'function_call', None)
             
-            if function_call:
-                contents.append(types.Content(role="model", parts=[types.Part(text=str(assistant_content))]))
-                tool_name = function_call.name
-                tool_args = function_call.args
-                print(f"Function to call: {tool_name} with arguments: {tool_args}")
-                
-                if self.session and tool_name:
-                    result = await self.session.call_tool(tool_name, tool_args)
-                    # Create a function response part
-                    function_response_part = types.Part.from_function_response(
-                        name=tool_name,
-                        response={"result": result},
-                    )
-                    # Append function call and result of the function execution to contents
-                    if content:
-                        contents.append(content) # Append the content from the model's response.
-                    contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
-                    response = self.client.models.generate_content(
-                        model=self.model,
-                        config=self.config,
-                        contents=contents,
-                    )
-                    if response.candidates and response.candidates[0].content and response.candidates[0].content.parts and len(response.candidates[0].content.parts) == 1 and response.candidates[0].content.parts[0].text:
-                        print(f"Final response: {response.candidates[0].content.parts[0].text}") 
-                        process_query = False
-                else:
-                    print("Session not available or tool name is None")
-                    break
+            # 处理所有函数调用
+            function_calls = []
+            for part in content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    function_calls.append({
+                        "name": part.function_call.name,
+                        "args": part.function_call.args
+                    })
+            
+            if function_calls:
+                # 直接处理所有函数调用
+                results = []
+                for call in function_calls:
+                    tool_name = call["name"]
+                    tool_args = call["args"]
+                    print(f"Function to call: {tool_name} with arguments: {tool_args}")
+                    
+                    if self.session and tool_name:
+                        result = await self.session.call_tool(tool_name, tool_args)
+                        results.append({
+                            "name": tool_name,
+                            "response": {"result": result}
+                        })
+                    else:
+                        print("Session not available or tool name is None")
+                        break
+                # 创建单个组合的函数响应
+                combined_response = {
+                    "tool_responses": results
+                }
+                function_response_part = types.Part.from_function_response(
+                    name="combined_tool_response",
+                    response=combined_response,
+                )
+                # Append function call and result of the function execution to contents
+                if content:
+                    self.append_content(content) # Append the content from the model's response.
+                self.append_content(types.Content(
+                    role="user", 
+                    parts=[function_response_part]
+                )) # Append the function response
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    config=self.config,
+                    contents=self.contents,
+                )
+                if response.candidates and response.candidates[0].content and response.candidates[0].content.parts and len(response.candidates[0].content.parts) == 1 and response.candidates[0].content.parts[0].text:
+                    print(f"Final response: {response.candidates[0].content.parts[0].text}") 
+                    process_query = False
+
             else:
                 text_parts = [part.text for part in content.parts if hasattr(part, 'text') and part.text]
                 if text_parts:
                     text_response = ' '.join(text_parts)
                     print(text_response)
                     assistant_content.append(text_response)
+                    self.append_content(types.Content(role="model", parts=[types.Part(text=str(assistant_content))]))
                 else:
                     print("No response generated")
                 if len(content.parts) == 1:

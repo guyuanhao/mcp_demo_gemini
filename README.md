@@ -6,6 +6,9 @@ This is a standard MCP demo from the Anthropic course, modified to use Gemini as
 
 The origin example is with Claude, provided on deeplearning.ai: https://learn.deeplearning.ai/courses/mcp-build-rich-context-ai-apps-with-anthropic/lesson/hg6oi/chatbot-example
 
+This project adds a Context Window control so that the conversation could be maintained with a state tracking.
+这个项目最大的更新除了模型替换外，还在于引入了Context Window机制使得模型的对话可被延续。
+
 Recommend to use UV to start this project: https://github.com/astral-sh/uv
 建议安装UV食用此项目，当然不装也可以，但是要手动跑pip install -r requirements.txt
 
