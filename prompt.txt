@@ -5,3 +5,7 @@ please extract information on the first two papers you found and smmarize them b
 search me papers for chemistry
 
 extract information for the 1104.3954v1 and math/0501518v2, smmarize them both for me
+
+Fetch the content of this website: https://modelcontextprotocol.io/docs/concepts/architecture and save the content in the file "mcp_summary.md", create a visual diagram that summarizes the content of "mcp_summary.md" and save it in a text file
+
+Fetch deeplearning.ai and find an interesting term. Search for 2 papers around the term and then summarize your findings and write them to a file called results.txt

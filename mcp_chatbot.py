@@ -1,34 +1,108 @@
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
-from typing import List
-import asyncio
-import nest_asyncio
-from dotenv import load_dotenv
+from typing import List, Dict, TypedDict
 from google import genai
 from google.genai import types
+from contextlib import AsyncExitStack
+import json
+import asyncio
 
 PAPER_DIR = "papers"
 
-nest_asyncio.apply()
 load_dotenv()
-# Create server parameters for stdio connection
-server_params = StdioServerParameters(
-    command="uv",  # Executable
-    args=["run", "research_server.py"],  # Optional command line arguments
-    env=None,  # Optional environment variables
-)
 chat_history_limit = 100
 
 class MCP_Chatbot:
     def __init__(self):
-        self.session: ClientSession | None = None
+        self.sessions: List[ClientSession] = []
+        self.exit_stack = AsyncExitStack()
         # The client gets the API key from the environment variable `GEMINI_API_KEY`.
         self.client = genai.Client()
         self.tool_types = None
         self.config = None
         self.model = "gemini-2.5-flash"
         self.contents = []
+        self.available_tools: List[types.FunctionDeclaration] = []
+        self.tool_to_session: Dict[str, ClientSession] = {}
+
+    def clean_schema(self, obj):
+        """递归清理 schema 中不兼容的字段"""
+        if isinstance(obj, dict):
+            # 移除 Gemini Schema 不支持的字段
+            forbidden_fields = {
+                '$schema', '$id', 'exclusiveMaximum', 'exclusiveMinimum',
+                'const', 'examples', 'if', 'then', 'else', 'allOf', 
+                'anyOf', 'oneOf', 'not', 'dependencies', 'patternProperties',
+                'additionalItems', 'contains', 'propertyNames',
+                'additional_properties', 'additionalProperties'
+            }
+            
+            cleaned = {}
+            for key, value in obj.items():
+                if key not in forbidden_fields:
+                    # 特殊处理 format 字段
+                    if key == 'format' and value not in ['enum', 'date-time']:
+                        continue  # 跳过不支持的 format 值
+                    cleaned[key] = self.clean_schema(value)
+            return cleaned
+        elif isinstance(obj, list):
+            return [self.clean_schema(item) for item in obj]
+        else:
+            return obj
+
+    async def connect_to_server(self, server_name: str, server_config: dict) -> None:
+        """Connect to a single MCP server."""
+        try:
+            server_params = StdioServerParameters(**server_config)
+            stdio_transport = await self.exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
+            read, write = stdio_transport
+            session = await self.exit_stack.enter_async_context(
+                ClientSession(read, write)
+            )
+            await session.initialize()
+            self.sessions.append(session)
+
+            response = await session.list_tools()
+            tools = response.tools
+            print(f"\nConnected to the tool server {server_name} with tools:", [tool.name for tool in tools])
+
+            
+            for tool in tools: 
+                self.tool_to_session[tool.name] = session
+                cleaned_schema = self.clean_schema(dict(tool.inputSchema))
+                gemini_tool = types.FunctionDeclaration(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters=types.Schema(**cleaned_schema) if isinstance(cleaned_schema, dict) else None
+                )
+                self.available_tools.append(gemini_tool)
+        except Exception as e:
+            print(f"Error connecting to server {server_name}: {e}")
+            raise
+
+    async def connect_to_servers(self):
+        """Connect to all configured MCP servers."""
+        try:
+            with open("server_config.json", "r") as file:
+                data = json.load(file)
+            
+            servers = data.get("mcpServers",{})
+            tasks = []
+            for server_name, server_config in servers.items():
+                await self.connect_to_server(server_name, server_config)
+            if self.available_tools:
+                self.tool_types = types.Tool(function_declarations=self.available_tools)
+                self.config = types.GenerateContentConfig(tools=[self.tool_types])
+        except Exception as e:
+            print(f"Error loading server configuration: {e}")
+            raise
+
+    async def cleanup(self):
+        """Clean up all MCP sessions."""
+        await self.exit_stack.aclose()
 
     def append_content(self, content):
         if len(self.contents) >= chat_history_limit:
@@ -75,9 +149,10 @@ class MCP_Chatbot:
                     tool_name = call["name"]
                     tool_args = call["args"]
                     print(f"Function to call: {tool_name} with arguments: {tool_args}")
-                    
-                    if self.session and tool_name:
-                        result = await self.session.call_tool(tool_name, tool_args)
+
+                    session = self.tool_to_session.get(tool_name)
+                    if session and tool_name:
+                        result = await session.call_tool(tool_name, tool_args)
                         results.append({
                             "name": tool_name,
                             "response": {"result": result}
@@ -120,7 +195,6 @@ class MCP_Chatbot:
                     print("No response generated")
                 if len(content.parts) == 1:
                     process_query = False
-    
 
     async def chat_loop(self):
         """Run an interactive chat loop"""
@@ -139,42 +213,17 @@ class MCP_Chatbot:
                     
             except Exception as e:
                 print(f"\nError: {str(e)}")
-
         
-    async def connect_to_server_and_run(self):
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                self.session = session
-                # Initialize the connection
-                await session.initialize()
-                
-                # List available tools
-                response = await session.list_tools()
-                
-                tools = response.tools
-                print("\nConnected to server with tools:", [tool.name for tool in tools])
-
-                gemini_tools = []
-                for tool in response.tools:
-                    gemini_tool = {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.inputSchema
-                    }
-                    gemini_tools.append(gemini_tool)
-
-                # The client gets the API key from the environment variable `GEMINI_API_KEY`.
-                self.tool_types = types.Tool(function_declarations=gemini_tools)
-                self.config = types.GenerateContentConfig(tools=[self.tool_types])
-    
-                await self.chat_loop()
-
 
 
 
 async def main():
     chatbot = MCP_Chatbot()
-    await chatbot.connect_to_server_and_run()
+    try:
+        await chatbot.connect_to_servers()
+        await chatbot.chat_loop()
+    finally:
+        await chatbot.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
