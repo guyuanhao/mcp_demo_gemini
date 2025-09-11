@@ -11,4 +11,7 @@ dependencies = [
     "google-genai",
     "nest-asyncio",
     "httpx[socks]>=0.28.1",
+    "langchain-google-genai",
+    "langchain-core",
+    "langchain"
 ]

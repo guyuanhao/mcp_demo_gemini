@@ -15,7 +15,7 @@ chat_history_limit = 100
 
 class MCP_Chatbot:
     def __init__(self):
-        self.sessions: List[ClientSession] = []
+        self.sessions = {}
         self.exit_stack = AsyncExitStack()
         # The client gets the API key from the environment variable `GEMINI_API_KEY`.
         self.client = genai.Client()
@@ -63,7 +63,6 @@ class MCP_Chatbot:
                 ClientSession(read, write)
             )
             await session.initialize()
-            self.sessions.append(session)
 
             response = await session.list_tools()
             tools = response.tools
