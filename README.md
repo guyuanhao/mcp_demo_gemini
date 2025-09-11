@@ -10,7 +10,8 @@ This project adds a Context Window control so that the conversation could be mai
 这个项目最大的更新除了模型替换外，还在于引入了Context Window机制使得模型的对话可被延续。
 
 Recommend to use UV to start this project: https://github.com/astral-sh/uv
-建议安装UV食用此项目，当然不装也可以，但是要手动跑pip install -r requirements.txt
+~~建议安装UV食用此项目，当然不装也可以，但是要手动跑pip install -r requirements.txt~~
+为保证requirements.txt和pyproject.toml的一致性，现已删除requirements.txt统一使用UV来使用此项目。
 
 ## Start MCP Server:
 Navigate to the project directory and initiate it with uv:
