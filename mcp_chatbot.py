@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import McpError
 from typing import List, Dict, TypedDict
 from google import genai
 from google.genai import types
@@ -64,11 +65,10 @@ class MCP_Chatbot:
             )
             await session.initialize()
 
+            # collect tools
             response = await session.list_tools()
             tools = response.tools
             print(f"\nConnected to the tool server {server_name} with tools:", [tool.name for tool in tools])
-
-            
             for tool in tools: 
                 self.tool_to_session[tool.name] = session
                 cleaned_schema = self.clean_schema(dict(tool.inputSchema))
@@ -78,6 +78,21 @@ class MCP_Chatbot:
                     parameters=types.Schema(**cleaned_schema) if isinstance(cleaned_schema, dict) else None
                 )
                 self.available_tools.append(gemini_tool)
+
+            # collect resources
+            try:
+                resourece_response = await session.list_resources()
+                if resourece_response and resourece_response.resources:
+                    resources = resourece_response.resources    
+                    for resource in resources:
+                        resource_uri = str(resource.uri)
+                        self.sessions[resource_uri] = session
+                        print(f"Connected to the resource server {server_name} with resource: {resource_uri}") 
+            except McpError as e:
+                if "Method not found" in str(e):
+                    print(f"Server {server_name} does not support list_resources(), skipping...")
+                else:
+                    raise
         except Exception as e:
             print(f"Error connecting to server {server_name}: {e}")
             raise
@@ -195,10 +210,37 @@ class MCP_Chatbot:
                 if len(content.parts) == 1:
                     process_query = False
 
+    async def get_resource(self, resource_uri):
+        session = self.sessions.get(resource_uri)
+        
+        # Fallback for papers URIs - try any papers resource session
+        if not session and resource_uri.startswith("papers://"):
+            for uri, sess in self.sessions.items():
+                if uri.startswith("papers://"):
+                    session = sess
+                    break
+            
+        if not session:
+            print(f"Resource '{resource_uri}' not found.")
+            return
+        
+        try:
+            result = await session.read_resource(uri=resource_uri)
+            if result and result.contents:
+                print(f"\nResource: {resource_uri}")
+                print("Content:")
+                print(result.contents[0].text)
+            else:
+                print("No content available.")
+        except Exception as e:
+            print(f"Error: {e}")
+
     async def chat_loop(self):
         """Run an interactive chat loop"""
         print("\nMCP Chatbot Started!")
         print("Type your queries or 'quit' to exit.")
+        print("Use @folders to see available topics")
+        print("Use @<topic> to search papers in that topic")
         
         while True:
             try:
@@ -206,6 +248,15 @@ class MCP_Chatbot:
         
                 if query.lower() == 'quit':
                     break
+
+                if query.startswith('@'):
+                    topic = query[1:]
+                    if topic == "folders":
+                        resource_uri = "papers://folders"
+                    else:
+                        resource_uri = f"papers://{topic}"
+                    await self.get_resource(resource_uri)
+                    continue
                     
                 await self.process_query(query)
                 print("\n")
