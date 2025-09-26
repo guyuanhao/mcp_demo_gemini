@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-from mcp import ClientSession, StdioServerParameters, types
+from mcp import ClientSession, StdioServerParameters, Tool, types
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import McpError
 from typing import List, Dict, TypedDict
@@ -8,6 +8,13 @@ from google.genai import types
 from contextlib import AsyncExitStack
 import json
 import asyncio
+import getpass
+import os
+import time
+
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from langchain.chat_models import init_chat_model
+from langchain_core.tools import tool
 
 PAPER_DIR = "papers"
 
@@ -19,13 +26,15 @@ class MCP_Chatbot:
         self.sessions = {}
         self.exit_stack = AsyncExitStack()
         # The client gets the API key from the environment variable `GEMINI_API_KEY`.
-        self.client = genai.Client()
+        self.client = init_chat_model("gemini-2.5-pro", model_provider="google_genai")
+        self.model_with_tools = None
         self.tool_types = None
         self.config = None
         self.model = "gemini-2.5-flash"
-        self.contents = []
         self.available_tools: List[types.FunctionDeclaration] = []
         self.tool_to_session: Dict[str, ClientSession] = {}
+        self.system_message = SystemMessage(content="You help search papers and answer questions about them")
+        self.conversation_history = []
 
     def clean_schema(self, obj):
         """递归清理 schema 中不兼容的字段"""
@@ -108,107 +117,76 @@ class MCP_Chatbot:
             for server_name, server_config in servers.items():
                 await self.connect_to_server(server_name, server_config)
             if self.available_tools:
-                self.tool_types = types.Tool(function_declarations=self.available_tools)
-                self.config = types.GenerateContentConfig(tools=[self.tool_types])
+                # 转换MCP工具为LangChain工具
+                langchain_tools = self.convert_mcp_tools_to_langchain()
+                self.model_with_tools = self.client.bind_tools(langchain_tools)
         except Exception as e:
             print(f"Error loading server configuration: {e}")
             raise
 
-    async def cleanup(self):
-        """Clean up all MCP sessions."""
-        await self.exit_stack.aclose()
+    def convert_mcp_tools_to_langchain(self):
+        """将MCP工具转换为LangChain工具"""
+        langchain_tools = []
+        def create_tool_factory(name, desc):
+            async def tool_func(**kwargs):
+                session = self.tool_to_session.get(name)
+                if session:
+                    result = await session.call_tool(name, kwargs)
+                    return result.content[0].text if result.content else "No result"
+                return "Tool not available"
+            tool_func.__name__ = name
+            tool_func.__doc__ = desc
+            return tool(tool_func)
 
-    def append_content(self, content):
-        if len(self.contents) >= chat_history_limit:
-            self.contents.pop(0)
-        self.contents.append(content)
+        for mcp_tool in self.available_tools:
+            # 为每个MCP工具创建LangChain工具
+            curr_name = mcp_tool.name
+            curr_desc = mcp_tool.description
+            langchain_tool = create_tool_factory(curr_name, curr_desc)
+            langchain_tools.append(langchain_tool)
+        
+        return langchain_tools
+
+    def append_content(self, content, message_type=HumanMessage, tool_call_id=None):
+        if len(self.conversation_history) >= chat_history_limit:
+            self.conversation_history = self.conversation_history[1:]
+        if message_type == ToolMessage:
+            self.conversation_history.append(message_type(content=content, tool_call_id=tool_call_id))
+        else:
+            self.conversation_history.append(message_type(content=content))
 
     async def process_query(self, query):
-        self.append_content(types.Content(
-            role="user", parts=[types.Part(text=query)]
-        ))
-
-        response = self.client.models.generate_content(
-            model= self.model,
-            contents=self.contents,
-            config=self.config,
-        )
+        self.append_content(query, HumanMessage)
         process_query = True
 
         while process_query:
-            assistant_content = []
-            if not response.candidates or not response.candidates[0].content:
+            response = self.model_with_tools.invoke([self.system_message] + self.conversation_history)
+            if not hasattr(response, 'id') or not response.id:
                 print("No response generated")
                 break
-                
-            candidate = response.candidates[0]
-            content = candidate.content
-            if not content or not content.parts:
-                print("No content parts in response")
-                break
+            self.append_content(response, AIMessage)
             
             # 处理所有函数调用
-            function_calls = []
-            for part in content.parts:
-                if hasattr(part, 'function_call') and part.function_call:
-                    function_calls.append({
-                        "name": part.function_call.name,
-                        "args": part.function_call.args
-                    })
-            
-            if function_calls:
+            if hasattr(response, 'tool_calls') and response.tool_calls:
                 # 直接处理所有函数调用
-                results = []
-                for call in function_calls:
+                for call in response.tool_calls:
                     tool_name = call["name"]
                     tool_args = call["args"]
-                    print(f"Function to call: {tool_name} with arguments: {tool_args}")
+                    tool_call_id = call["id"]
+                    print(f"Function to call: {tool_name} with arguments: {tool_args} and id: {tool_call_id}")
 
                     session = self.tool_to_session.get(tool_name)
                     if session and tool_name:
-                        result = await session.call_tool(tool_name, tool_args)
-                        results.append({
-                            "name": tool_name,
-                            "response": {"result": result}
-                        })
+                        tool_result = await session.call_tool(tool_name, tool_args)
+                        self.append_content(tool_result, ToolMessage, tool_call_id)
                     else:
                         print("Session not available or tool name is None")
                         break
-                # 创建单个组合的函数响应
-                combined_response = {
-                    "tool_responses": results
-                }
-                function_response_part = types.Part.from_function_response(
-                    name="combined_tool_response",
-                    response=combined_response,
-                )
-                # Append function call and result of the function execution to contents
-                if content:
-                    self.append_content(content) # Append the content from the model's response.
-                self.append_content(types.Content(
-                    role="user", 
-                    parts=[function_response_part]
-                )) # Append the function response
-                response = self.client.models.generate_content(
-                    model=self.model,
-                    config=self.config,
-                    contents=self.contents,
-                )
-                if response.candidates and response.candidates[0].content and response.candidates[0].content.parts and len(response.candidates[0].content.parts) == 1 and response.candidates[0].content.parts[0].text:
-                    print(f"Final response: {response.candidates[0].content.parts[0].text}") 
-                    process_query = False
-
+                continue
+            # exit and print msg if this is not a tool call
             else:
-                text_parts = [part.text for part in content.parts if hasattr(part, 'text') and part.text]
-                if text_parts:
-                    text_response = ' '.join(text_parts)
-                    print(text_response)
-                    assistant_content.append(text_response)
-                    self.append_content(types.Content(role="model", parts=[types.Part(text=str(assistant_content))]))
-                else:
-                    print("No response generated")
-                if len(content.parts) == 1:
-                    process_query = False
+                print(response.content)
+                process_query = False
 
     async def get_resource(self, resource_uri):
         session = self.sessions.get(resource_uri)
@@ -234,6 +212,10 @@ class MCP_Chatbot:
                 print("No content available.")
         except Exception as e:
             print(f"Error: {e}")
+    
+    async def cleanup(self):
+        """Clean up all MCP sessions."""
+        await self.exit_stack.aclose()
 
     async def chat_loop(self):
         """Run an interactive chat loop"""
@@ -246,7 +228,7 @@ class MCP_Chatbot:
             try:
                 query = input("\nQuery: ").strip()
         
-                if query.lower() == 'quit':
+                if query.lower() == 'quit' or query.lower() == 'exit':
                     break
 
                 if query.startswith('@'):
@@ -268,6 +250,8 @@ class MCP_Chatbot:
 
 
 async def main():
+    if not os.environ.get("GOOGLE_API_KEY"):
+        os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter API key for Google Gemini: ")
     chatbot = MCP_Chatbot()
     try:
         await chatbot.connect_to_servers()

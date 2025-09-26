@@ -13,5 +13,6 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "langchain-google-genai",
     "langchain-core",
-    "langchain"
+    "langchain",
+    "langgraph"
 ]
