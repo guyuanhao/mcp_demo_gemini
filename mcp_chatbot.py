@@ -26,7 +26,7 @@ class MCP_Chatbot:
         self.sessions = {}
         self.exit_stack = AsyncExitStack()
         # The client gets the API key from the environment variable `GEMINI_API_KEY`.
-        self.client = init_chat_model("gemini-2.5-pro", model_provider="google_genai")
+        self.client = init_chat_model("gemini-2.5-flash", model_provider="google_genai")
         self.model_with_tools = None
         self.tool_types = None
         self.config = None
@@ -129,9 +129,13 @@ class MCP_Chatbot:
         langchain_tools = []
         def create_tool_factory(name, desc):
             async def tool_func(**kwargs):
+                print(f"Debug: tool_func called with name={name}, kwargs={kwargs}")
+                if 'kwargs' in kwargs and isinstance(kwargs['kwargs'], dict):
+                    kwargs = kwargs['kwargs']
                 session = self.tool_to_session.get(name)
                 if session:
-                    result = await session.call_tool(name, kwargs)
+                    print(f"Debug: calling session.call_tool with name={name}, kwargs={kwargs}")
+                    result = await session.call_tool(name, kwargs)  # 先不用 **
                     return result.content[0].text if result.content else "No result"
                 return "Tool not available"
             tool_func.__name__ = name
@@ -151,9 +155,12 @@ class MCP_Chatbot:
         if len(self.conversation_history) >= chat_history_limit:
             self.conversation_history = self.conversation_history[1:]
         if message_type == ToolMessage:
+            print(f"Debug: appending ToolMessage with content={content}, tool_call_id={tool_call_id}")
             self.conversation_history.append(message_type(content=content, tool_call_id=tool_call_id))
-        else:
+        elif message_type == HumanMessage:
             self.conversation_history.append(message_type(content=content))
+        else:
+            self.conversation_history.append(content)
 
     async def process_query(self, query):
         self.append_content(query, HumanMessage)
